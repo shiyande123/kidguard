@@ -13,7 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.currentCoroutineJob
+
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -93,7 +93,7 @@ class LockController @Inject constructor(
 
         scope.launch {
             // Track job so it can be cancelled when service is destroyed
-            currentLockJob = currentCoroutineJob()
+            currentLockJob = coroutineContext[Job]
 
             DebugLog.log(TAG, "Face matched: $childName")
 
