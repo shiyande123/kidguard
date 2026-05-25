@@ -31,7 +31,7 @@ class ModelDownloader @Inject constructor(
 
     sealed class DownloadState {
         data object Idle : DownloadState()
-        data class Downloading(val bytesDownloaded: Long, val expectedTotal: Long) : DownloadState()
+        data class Downloading(val bytesDownloaded: Long, val totalBytes: Long) : DownloadState()
         data class Success(val file: File) : DownloadState()
         data class Error(val message: String) : DownloadState()
     }
@@ -58,9 +58,10 @@ class ModelDownloader @Inject constructor(
 
         _downloadProgress.value = DownloadState.Downloading(0, 0)
 
-        try {
-            val zipFile = File(modelDir, "buffalo_s.zip")
+        val zipFile = File(modelDir, "buffalo_s.zip")
+        var expectedTotal = 1L  // declared at function level so extraction phase can reference it
 
+        try {
             // Download the zip file
             val url = URL(MODEL_URL)
             val conn = url.openConnection() as HttpURLConnection
@@ -70,7 +71,7 @@ class ModelDownloader @Inject constructor(
                 conn.instanceFollowRedirects = true
                 conn.connect()
 
-                val expectedTotal = conn.contentLength.toLong().coerceAtLeast(1)
+                expectedTotal = conn.contentLength.toLong().coerceAtLeast(1)
                 DebugLog.log(TAG, "Downloading model from $MODEL_URL (total=$expectedTotal)")
 
                 conn.inputStream.use { input ->
@@ -89,33 +90,35 @@ class ModelDownloader @Inject constructor(
             } finally {
                 conn.disconnect()
             }
-
-            DebugLog.log(TAG, "Download complete, zip size=${zipFile.length()}")
-
-            // Extract .onnx from zip
-            _downloadProgress.value = DownloadState.Downloading(zipFile.length(), expectedTotal * 2)
-
-            try {
-                extractOnnxFromZip(zipFile, modelFile)
-                zipFile.delete()
-                DebugLog.log(TAG, "Model extracted: ${modelFile.length()} bytes")
-            } catch (e: Exception) {
-                DebugLog.log(TAG, "Zip extraction failed: ${e.message}, trying direct download")
-                // If extraction fails, maybe the zip contains multiple files
-                // Let's try a different approach - direct onnx download
-                downloadDirectOnnx()
-                zipFile.delete()
-            }
-
-            if (modelFile.exists() && modelFile.length() > 10_000_000) {
-                _downloadProgress.value = DownloadState.Success(modelFile)
-                DebugLog.log(TAG, "Model ready: ${modelFile.length()} bytes")
-            } else {
-                throw Exception("Model file too small or missing after extraction")
-            }
-
         } catch (e: Exception) {
             val msg = "Download failed: ${e.javaClass.simpleName}: ${e.message}"
+            DebugLog.log(TAG, msg)
+            _downloadProgress.value = DownloadState.Error(msg)
+            return@withContext
+        }
+
+        DebugLog.log(TAG, "Download complete, zip size=${zipFile.length()}")
+
+        // Extract .onnx from zip (now expectedTotal is in scope!)
+        _downloadProgress.value = DownloadState.Downloading(zipFile.length(), expectedTotal * 2)
+
+        try {
+            extractOnnxFromZip(zipFile, modelFile)
+            zipFile.delete()
+            DebugLog.log(TAG, "Model extracted: ${modelFile.length()} bytes")
+        } catch (e: Exception) {
+            DebugLog.log(TAG, "Zip extraction failed: ${e.message}, trying direct download")
+            // If extraction fails, maybe the zip contains multiple files
+            // Let's try a different approach - direct onnx download
+            downloadDirectOnnx()
+            zipFile.delete()
+        }
+
+        if (modelFile.exists() && modelFile.length() > 10_000_000) {
+            _downloadProgress.value = DownloadState.Success(modelFile)
+            DebugLog.log(TAG, "Model ready: ${modelFile.length()} bytes")
+        } else {
+            val msg = "Model file too small or missing after extraction"
             DebugLog.log(TAG, msg)
             _downloadProgress.value = DownloadState.Error(msg)
         }
@@ -154,8 +157,8 @@ class ModelDownloader @Inject constructor(
                 conn.connect()
 
                 if (conn.responseCode == 200) {
-                    val expectedTotal = conn.contentLength.toLong().coerceAtLeast(1)
-                    _downloadProgress.value = DownloadState.Downloading(0, expectedTotal)
+                    val directTotal = conn.contentLength.toLong().coerceAtLeast(1)
+                    _downloadProgress.value = DownloadState.Downloading(0, directTotal)
 
                     conn.inputStream.use { input ->
                         FileOutputStream(modelFile).use { output ->
@@ -165,7 +168,7 @@ class ModelDownloader @Inject constructor(
                             while (input.read(buffer).also { read = it } != -1) {
                                 output.write(buffer, 0, read)
                                 downloaded += read
-                                _downloadProgress.value = DownloadState.Downloading(downloaded, expectedTotal)
+                                _downloadProgress.value = DownloadState.Downloading(downloaded, directTotal)
                             }
                         }
                     }
