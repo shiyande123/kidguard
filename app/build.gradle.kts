@@ -1,3 +1,5 @@
+import java.net.URL
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -6,18 +8,76 @@ plugins {
     id("com.google.dagger.hilt.android")
 }
 
+// Download buffalo_s.onnx into assets during build
+val onnxAssetsDir = file("src/main/assets/onnx_models")
+val onnxModelFile = file("src/main/assets/onnx_models/buffalo_s.onnx")
+val modelZipUrl = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip"
+
+val downloadOnnxModel by tasks.registering {
+    group = "build"
+    description = "Download buffalo_s.onnx face recognition model"
+
+    doFirst {
+        onnxAssetsDir.mkdirs()
+        if (onnxModelFile.exists() && onnxModelFile.length() > 10_000_000) {
+            logger.info("buffalo_s.onnx already exists (${onnxModelFile.length() / 1024 / 1024} MB) — skipping download")
+            return@doFirst
+        }
+        logger.info("Downloading buffalo_s.onnx from $modelZipUrl ...")
+    }
+
+    doLast {
+        try {
+            val tmpZip = file("${buildDir}/buffalo_s.zip")
+            tmpZip.parentFile?.mkdirs()
+
+            // Download via Java URL (no external tools needed)
+            URL(modelZipUrl).openConnection().apply {
+                connectTimeout = 30_000
+                readTimeout = 120_000
+                setRequestProperty("User-Agent", "KidGuard-Android/1.0")
+                val input = getInputStream()
+                tmpZip.outputStream().use { out -> input.copyTo(out) }
+            }
+            logger.info("Downloaded zip: ${tmpZip.length() / 1024 / 1024} MB")
+
+            // Extract .onnx from zip
+            java.util.zip.ZipFile(tmpZip).use { zip ->
+                zip.entries().asSequence().forEach { entry ->
+                    if (!entry.isDirectory && entry.name.endsWith(".onnx")) {
+                        logger.info("Extracting ${entry.name}...")
+                        zip.getInputStream(entry).use { input ->
+                            onnxModelFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        logger.info("buffalo_s.onnx ready: ${onnxModelFile.length() / 1024 / 1024} MB")
+                        return@doLast
+                    }
+                }
+            }
+            throw GradleException("No .onnx file found in downloaded zip")
+        } catch (e: Exception) {
+            throw GradleException("Failed to download buffalo_s.onnx: ${e.message}", e)
+        }
+    }
+}
+
+// Run before every build
+tasks.matching { it.name.startsWith("pre") && it.name.endsWith("Build") }.configureEach {
+    dependsOn(downloadOnnxModel)
+}
+
 android {
     namespace = "com.kidguard"
     compileSdk = 35
-
-
 
     defaultConfig {
         applicationId = "com.kidguard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.0.5"
+        versionCode = 8
+        versionName = "1.0.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -34,15 +94,13 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
         debug {
-            // AGP 默认使用 debug keystore 生成 v3 签名
-            // 华为需要 v1，打包后需用 jarsigner 补签
+            // AGP default debug keystore for v3 signing
         }
     }
 
@@ -90,12 +148,13 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
 
+    // ML Kit face detection — primary detector (no GMS required for bundled model)
     implementation("com.google.mlkit:face-detection:16.1.7")
 
-    // SeetaFace2 for face detection + recognition (no GMS required)
+    // SeetaFace2 — Java stubs only (native libs unavailable in CI, ML Kit fallback used)
     implementation(fileTree("libs") { include("*.jar", "*.aar") })
 
-    // ONNX Runtime Android - 人脸识别（支持 arm64-v8a）
+    // ONNX Runtime for face recognition
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 
     val roomVersion = "2.6.1"
